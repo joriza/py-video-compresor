@@ -55,8 +55,10 @@ def run_converter(
     )
 
 
-def make_sample(path: Path, size: str, seconds: float, audio_kbps: int) -> None:
-    """Genera una muestra sintética H.264/AAC vía fuentes lavfi de ffmpeg."""
+def make_sample(
+    path: Path, size: str, seconds: float, audio_kbps: int, audio_codec: str = "aac"
+) -> None:
+    """Genera una muestra sintética H.264 + audio (AAC por defecto) vía lavfi."""
     proc = subprocess.run(
         [
             "ffmpeg",
@@ -78,7 +80,7 @@ def make_sample(path: Path, size: str, seconds: float, audio_kbps: int) -> None:
             "-preset",
             "veryfast",
             "-c:a",
-            "aac",
+            audio_codec,
             "-b:a",
             f"{audio_kbps}k",
             "-shortest",
@@ -222,6 +224,31 @@ def test_portrait_480(src: Path) -> None:
         "portrait: video codec is HEVC",
         str(vs.get("codec_name", "")).startswith("hevc"),
         f"codec={vs.get('codec_name')}",
+    )
+
+
+def test_ac3_audio_reencode(src: Path) -> None:
+    """Regresión de audio no copiable: una fuente AC3 a 256 kbit/s (ni AAC ni
+    <= 160 kbit/s) debe re-codificarse a AAC y no romper la conversión. Cubre
+    la rama de re-codificación de audio_args_for, que alguna vez quedó
+    inalcanzable por un error de indentación y devolvía None.
+    """
+    out = src.with_name("ac3 clip_m.mp4")
+    proc = run_converter([str(src)])
+    check("ac3: convert.py exits 0", proc.returncode == 0, fail_detail(proc))
+    check("ac3: output file exists", out.exists(), str(out))
+    if not out.exists():
+        return
+    audios = [
+        s
+        for s in ffprobe_json(out).get("streams", [])
+        if s.get("codec_type") == "audio"
+    ]
+    codec = audios[0].get("codec_name") if audios else "none"
+    check(
+        "ac3: audio re-encoded to AAC",
+        bool(audios) and codec == "aac",
+        f"audio codec={codec}",
     )
 
 
@@ -390,6 +417,11 @@ def main() -> int:
         print(f"Generating portrait sample: {portrait.name}")
         make_sample(portrait, "608x1080", 3, 96)
         test_portrait_480(portrait)
+
+        ac3 = TMP / "ac3 clip.mp4"
+        print(f"Generating AC3-audio sample: {ac3.name}")
+        make_sample(ac3, "480x360", 3, 256, audio_codec="ac3")
+        test_ac3_audio_reencode(ac3)
 
         dry = TMP / "dry run clip.mp4"
         print(f"Generating dry-run sample: {dry.name}")

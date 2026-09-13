@@ -164,7 +164,7 @@ La suite genera muestras sintéticas 1080p/480p (horizontal y vertical) con
 ffmpeg lavfi dentro de `tests_tmp/` (se elimina al salir), incluye nombres de
 archivo con espacios y verifica el comportamiento de codec, escalado, audio,
 tamaño, dry-run, omisión y forzado, más una verificación unitaria de la
-matemática de políticas y del armado del comando (30 verificaciones).
+matemática de políticas y del armado del comando (33 verificaciones).
 
 ## Historial de cambios
 
@@ -185,8 +185,11 @@ matemática de políticas y del armado del comando (30 verificaciones).
   - Fusible a nivel de corrida: tras un fallo del encoder de hardware, el resto
     del lote pasa directo a la CPU.
   - Documentación y comentarios del código traducidos al español.
-  - Suite de smoke ampliada a 30 verificaciones (incluye el caso vertical y
-    la verificación unitaria de políticas).
+  - Suite de smoke ampliada a 33 verificaciones (caso vertical, audio AC3
+    re-codificado y verificación unitaria de políticas).
+  - Corregido: la rama de re-codificación de audio (no copiable) quedó
+    inalcanzable por indentación y hacía fallar la conversión con
+    `TypeError` (p. ej. fuentes AC3 o AAC > 160 kbit/s).
 
 ## Limitaciones conocidas
 
