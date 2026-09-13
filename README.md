@@ -50,11 +50,11 @@ python convert.py --force clip.mov
 | `INPUT ...` | *(ninguno)* | Archivos de video a convertir; omitir para usar el selector. |
 | `--input-dir DIR` | `input` | Carpeta que escanea el selector interactivo. |
 | `--codec {hevc}` | `hevc` | Codec destino. `av1`/`h264` están registrados pero **aún sin soporte**. |
-| `--res {max720}` | `max720` | Política de resolución. `keep`/`smart1080` están registradas pero **aún sin soporte**. |
+| `--res {short480,max720}` | `short480` | Política de resolución. `short480` ajusta al **marco estándar 480p** (854x480 horizontal / 480x854 vertical) en ambos lados (consciente de videos verticales, conserva el aspecto y nunca reescala); `max720` sigue disponible; `keep`/`smart1080` están registradas pero **aún sin soporte**. |
 | `--speed {fast}` | `fast` | Perfil de velocidad. `max`/`ultra` están registrados pero **aún sin soporte**. |
 | `--suffix SUFFIX` | `_m` | Sufijo del nombre de archivo de salida (antes de `.mp4`). |
 | `--force` | desactivado | Re-codificar aunque el archivo de salida exista. |
-| `--dry-run` | desactivado | Imprime el plan por archivo (encoder, escalado, audio, salida) y no codifica nada. |
+| `--dry-run` | desactivado | Imprime el plan por archivo (encoder, escalado, bitrate, audio, salida) y no codifica nada. |
 | `--hw`, `--gpu` | desactivado | Habilita la detección de encoders por hardware (NVENC/QSV/AMF); por defecto se usa la CPU (`libx265`). |
 | `--crf N` | `28` | Calidad CRF de `libx265`: más alto = archivo más chico, más bajo = mejor calidad; aplica solo al encoder de CPU. |
 
@@ -110,8 +110,24 @@ Sintaxis de selección: `1 3 5-7` (espacios o comas, rangos inclusivos),
    - `hevc_amf`: `-quality balanced -rc qvbr -qvbr_quality_level 26`
    - `hevc_nvenc`: `-preset p6 -tune hq -rc vbr -cq 26 -b:v 0 -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20`
    - `hevc_qsv`: `-preset veryfast -global_quality 26`
-4. **Resolución (`max720`)** — las fuentes más altas que 720p reciben
-   `-vf scale=-2:720:flags=lanczos`; las fuentes más pequeñas nunca se reescalan.
+4. **Resolución (`short480`)** — la fuente se ajusta al **marco estándar
+   480p** (854x480 horizontal / 480x854 vertical): un único factor de escala
+   respeta a la vez el tope del lado corto (480) y el del lado largo (854),
+   conservando el aspecto y sin reescalar hacia arriba. Ejemplos:
+   1920x1080 → 854x480; 1280x512 → 854x342; 1000x400 → 854x342 (manda el
+   lado largo). Las fuentes que ya entran en el marco (p. ej. 640x480 o
+   480x854) no se tocan. `--res max720` restaura el comportamiento anterior
+   (tope de altura en 720 p).
+
+   El **bitrate** también se acota (tope de densidad de bits): detrás del
+   objetivo de calidad del encoder (CRF / `-cq` / `-global_quality`) se
+   aplican `-maxrate`/`-bufsize` a 0,08 bits por píxel por cuadro, es decir
+   ≈984 kbit/s a 854x480@30, con piso de 300 kbit/s. El tope se calcula
+   sobre las dimensiones reales de salida con cualquier política de
+   resolución (`max720` incluida). Es un techo, no un
+   objetivo: solo muerde en fuentes ruidosas o de alta entropía donde el
+   modo calidad dispararía el bitrate; si ffprobe no informa fps, no se
+   aplica.
 5. **Audio** — copia directa de streams (`-c:a copy`, sin pérdida) cuando todos
    los streams de audio son AAC a ≤ 160 kbit/s; en caso contrario, se
    re-codifica a AAC a `128k` (≤ 2 canales) o `256k` (> 2 canales). Los
@@ -144,14 +160,23 @@ Desde la raíz del proyecto (usa el Python del venv local):
 .venv/Scripts/python.exe test_smoke.py
 ```
 
-La suite genera muestras sintéticas 1080p/480p con ffmpeg lavfi dentro de
-`tests_tmp/` (se elimina al salir), incluye un nombre de archivo con espacios y
-verifica el comportamiento de codec, escalado, audio, tamaño, dry-run, omisión
-y forzado (22 verificaciones).
+La suite genera muestras sintéticas 1080p/480p (horizontal y vertical) con
+ffmpeg lavfi dentro de `tests_tmp/` (se elimina al salir), incluye nombres de
+archivo con espacios y verifica el comportamiento de codec, escalado, audio,
+tamaño, dry-run, omisión y forzado, más una verificación unitaria de la
+matemática de políticas y del armado del comando (30 verificaciones).
 
 ## Historial de cambios
 
 - **2026-09-13**
+  - La política de resolución predeterminada pasa de `max720` a `short480`
+    (lado corto a 480, consciente de videos verticales).
+  - `short480` ajusta ahora al **marco estándar 480p** completo (854x480
+    horizontal / 480x854 vertical): tope en ambos lados, consciente de la
+    orientación y sin reescalar hacia arriba.
+  - Nuevo tope de densidad de bits: `-maxrate`/`-bufsize` a 0,08 bpp
+    (≈984 kbit/s a 854x480@30, piso de 300 kbit/s) detrás del objetivo de
+    calidad del encoder.
   - El valor predeterminado de `--crf` pasa a **28** (antes 24), validado
     empíricamente: ≈49% de reducción sin pérdida de calidad perceptible.
   - El encoder de CPU (`libx265`) pasa a ser el predeterminado; `--cpu-only` se
@@ -160,7 +185,8 @@ y forzado (22 verificaciones).
   - Fusible a nivel de corrida: tras un fallo del encoder de hardware, el resto
     del lote pasa directo a la CPU.
   - Documentación y comentarios del código traducidos al español.
-  - Suite de smoke ampliada a 22 verificaciones.
+  - Suite de smoke ampliada a 30 verificaciones (incluye el caso vertical y
+    la verificación unitaria de políticas).
 
 ## Limitaciones conocidas
 

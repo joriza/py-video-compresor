@@ -50,6 +50,9 @@ MB = 1024 * 1024
 ENCODER_PROBE_TIMEOUT_S = 15
 FFPROBE_TIMEOUT_S = 30
 AUDIO_COPY_MAX_BITRATE = 160_000  # bit/s; AAC a este valor o menos se copia directo
+MAX_BITS_PER_PIXEL = 0.08  # tope de densidad de bits: bits por píxel por cuadro
+MIN_MAXRATE_BPS = 300_000  # bit/s; piso del tope para resoluciones chicas
+MAXRATE_BUFFER_MULT = 2.0  # bufsize = maxrate * este factor (buffer VBV)
 PROGRESS_BAR_WIDTH = 24
 PROGRESS_MIN_INTERVAL_S = 0.1
 
@@ -70,14 +73,26 @@ VIDEO_EXTENSIONS = {
 
 @dataclass(frozen=True)
 class ResPolicy:
-    """Política de resolución: altura máxima de salida opcional (nunca reescala)."""
+    """Política de resolución: tope opcional de altura, del lado corto, o de
+    ambos lados (caja) para la salida (conserva el aspecto y nunca reescala
+    hacia arriba).
+    """
 
     description: str
     implemented: bool = False
     max_height: int | None = None
+    max_short_side: int | None = None
+    max_long_side: int | None = None
 
 
 RES_POLICIES: dict[str, ResPolicy] = {
+    "short480": ResPolicy(
+        "fit within standard 480p bounds (854x480 landscape / 480x854 "
+        "portrait); never upscale",
+        implemented=True,
+        max_short_side=480,
+        max_long_side=854,
+    ),
     "max720": ResPolicy(
         "cap height at 720p; never upscale", implemented=True, max_height=720
     ),
@@ -218,6 +233,7 @@ class MediaInfo:
     height: int = 0
     video_codec: str = ""
     duration_s: float | None = None
+    fps: float | None = None
     size_bytes: int = 0
     audio_streams: list[dict] = field(default_factory=list)
 
@@ -315,6 +331,26 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _parse_rate_fraction(value: object) -> float | None:
+    """Interpreta una fracción de ffprobe ('30000/1001', '30/1') como float.
+
+    Devuelve None cuando falta, no se puede interpretar o el resultado no es
+    positivo.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    numerator_txt, _, denominator_txt = text.partition("/")
+    try:
+        numerator = float(numerator_txt)
+        denominator = float(denominator_txt) if denominator_txt else 1.0
+    except ValueError:
+        return None
+    if numerator <= 0 or denominator <= 0:
+        return None
+    return numerator / denominator
+
+
 def probe_media(path: Path) -> MediaInfo:
     """Sondea ``path`` con ffprobe y devuelve el MediaInfo analizado.
 
@@ -378,32 +414,102 @@ def probe_media(path: Path) -> MediaInfo:
     except (TypeError, ValueError):
         size = path.stat().st_size
 
+    fps = _parse_rate_fraction(video.get("avg_frame_rate"))
+    if fps is None:
+        fps = _parse_rate_fraction(video.get("r_frame_rate"))
+
     return MediaInfo(
         path=path,
         width=_safe_int(video.get("width")),
         height=_safe_int(video.get("height")),
         video_codec=str(video.get("codec_name") or ""),
         duration_s=duration,
+        fps=fps,
         size_bytes=size,
         audio_streams=audio,
     )
 
 
 # --------------------------------------------------------------------------- #
-# Resolución de políticas (escalado / audio)
+# Resolución de políticas (escalado / audio / bitrate)
 # --------------------------------------------------------------------------- #
 
 
-def scale_args_for(policy_name: str, source_height: int) -> tuple[list[str], str]:
-    """Devuelve (argumentos ffmpeg, descripción legible) de la política de
-    resolución.
+def _even_size(width: float, height: float) -> tuple[int, int]:
+    """Redondea dimensiones al entero par más cercano (mínimo 2).
+
+    Con cotas pares, el redondeo hacia arriba del ajuste de paridad nunca
+    supera la cota correspondiente.
+    """
+    out_w = max(2, int(round(width)))
+    if out_w % 2:
+        out_w += 1
+    out_h = max(2, int(round(height)))
+    if out_h % 2:
+        out_h += 1
+    return out_w, out_h
+
+
+def target_size_for(
+    policy_name: str, source_width: int, source_height: int
+) -> tuple[int, int]:
+    """Devuelve las dimensiones de salida (ancho, alto) de la política.
+
+    Para políticas con ``max_short_side`` ajusta la fuente a la caja de la
+    política (lado corto ``max_short_side``, lado largo ``max_long_side`` si
+    está definido; si no, el mismo tope del lado corto) con un único factor
+    de escala común y sin reescalar hacia arriba; como ambas cotas son pares,
+    la salida nunca supera su tope. Con ``max_height`` aplica el tope clásico
+    de altura (mismo redondeo a par). Para políticas sin tope devuelve las
+    dimensiones de la fuente sin cambios.
     """
     policy = RES_POLICIES[policy_name]
-    cap = policy.max_height
-    if cap is None or source_height <= cap:
+    if source_width <= 0 or source_height <= 0:
+        return source_width, source_height
+    if policy.max_short_side is not None:
+        short_bound = policy.max_short_side
+        long_bound = (
+            policy.max_long_side
+            if policy.max_long_side is not None
+            else policy.max_short_side
+        )
+        scale = min(
+            short_bound / min(source_width, source_height),
+            long_bound / max(source_width, source_height),
+            1.0,
+        )
+        if scale >= 1.0:
+            return source_width, source_height
+        return _even_size(source_width * scale, source_height * scale)
+    if policy.max_height is not None and source_height > policy.max_height:
+        scale = policy.max_height / source_height
+        return _even_size(source_width * scale, source_height * scale)
+    return source_width, source_height
+
+
+def scale_args_for(
+    policy_name: str, source_width: int, source_height: int
+) -> tuple[list[str], str]:
+    """Devuelve (argumentos ffmpeg, descripción legible) de la política de
+    resolución.
+
+    Con ``max_short_side`` se ajusta la fuente a la caja estándar de la
+    política (lado corto y lado largo a la vez), conservando el aspecto y sin
+    reescalar hacia arriba; con ``max_height`` se aplica el tope clásico
+    de altura.
+    """
+    policy = RES_POLICIES[policy_name]
+    out_w, out_h = target_size_for(policy_name, source_width, source_height)
+    if (out_w, out_h) == (source_width, source_height):
+        if policy.max_short_side is not None:
+            return [], (
+                f"none (source {source_width}x{source_height} fits within "
+                f"{policy.max_long_side or policy.max_short_side}x"
+                f"{policy.max_short_side} bounds)"
+            )
         return [], f"none (source height {source_height}, no scaling)"
-    vf = f"scale=-2:{cap}:flags=lanczos"
-    return ["-vf", vf], f"{vf} (source height {source_height} -> {cap}; never upscale)"
+    vf = f"scale={out_w}:{out_h}:flags=lanczos"
+    return ["-vf", vf], f"{vf} ({source_width}x{source_height} -> {out_w}x{out_h}; never upscale)"
 
 
 def audio_args_for(audio_streams: list[dict]) -> tuple[list[str], str]:
@@ -437,6 +543,27 @@ def audio_args_for(audio_streams: list[dict]) -> tuple[list[str], str]:
         "-b:a",
         bitrate,
     ], f"re-encode AAC {bitrate} (max {max_channels or '?'} ch)"
+
+
+def bitrate_cap_args_for(
+    out_w: int, out_h: int, fps: float | None
+) -> tuple[list[str], str]:
+    """Devuelve (argumentos ffmpeg, descripción legible) del tope de bitrate.
+
+    Calcula un techo de densidad de bits (``MAX_BITS_PER_PIXEL`` por píxel y
+    por cuadro) sobre el tamaño de salida, con piso ``MIN_MAXRATE_BPS``, y lo
+    aplica como ``-maxrate``/``-bufsize`` detrás del objetivo de calidad del
+    encoder. Sin fps conocido (o con dimensiones inválidas) no se aplica
+    nada: manda el objetivo de calidad.
+    """
+    if fps is None or fps <= 0 or out_w <= 0 or out_h <= 0:
+        return [], "none (fps unknown; encoder quality target only)"
+    rate = max(MAX_BITS_PER_PIXEL * out_w * out_h * fps, MIN_MAXRATE_BPS)
+    maxrate_k = max(1, round(rate / 1000))
+    bufsize_k = max(2, round(rate * MAXRATE_BUFFER_MULT / 1000))
+    bpp = rate / (out_w * out_h * fps)
+    desc = f"cap {maxrate_k}k video bitrate ({bpp:.3f} bpp at {out_w}x{out_h}x{fps:.2f})"
+    return ["-maxrate", f"{maxrate_k}k", "-bufsize", f"{bufsize_k}k"], desc
 
 
 # --------------------------------------------------------------------------- #
@@ -547,6 +674,7 @@ def build_ffmpeg_command(
     scale_args: Sequence[str],
     audio_args: Sequence[str],
     crf: int | None = None,
+    bitrate_cap_args: Sequence[str] = (),
 ) -> list[str]:
     """Ensambla la lista completa de argumentos de ffmpeg para una conversión."""
     cmd = [
@@ -573,6 +701,7 @@ def build_ffmpeg_command(
     if crf is not None:
         video_args = _replace_flag_value(video_args, "-crf", str(crf))
     cmd.extend(video_args)
+    cmd.extend(bitrate_cap_args)
     cmd.extend(audio_args)
     cmd.extend(["-c:s", "mov_text", "-movflags", "+faststart", str(dst)])
     return cmd
@@ -702,8 +831,10 @@ def convert_one(src: Path, options: ConvertOptions, encoder: EncoderSpec) -> Fil
             src=src, dst=dst, status="skipped", detail=detail, in_bytes=info.size_bytes
         )
 
-    scale_args, scale_desc = scale_args_for(options.res_policy, info.height)
+    scale_args, scale_desc = scale_args_for(options.res_policy, info.width, info.height)
     audio_args, audio_desc = audio_args_for(info.audio_streams)
+    out_w, out_h = target_size_for(options.res_policy, info.width, info.height)
+    cap_args, cap_desc = bitrate_cap_args_for(out_w, out_h, info.fps)
 
     if options.dry_run:
         say("DRY-RUN plan:")
@@ -716,6 +847,7 @@ def convert_one(src: Path, options: ConvertOptions, encoder: EncoderSpec) -> Fil
             f"{format_clock(info.duration_s)}, {human_mb(info.size_bytes)} MB"
         )
         say(f"  scale   : {scale_desc}")
+        say(f"  bitrate : {cap_desc}")
         say(f"  audio   : {audio_desc}")
         say("  subs    : mov_text (converted when present)")
         say(f"  output  : {dst}")
@@ -735,7 +867,14 @@ def convert_one(src: Path, options: ConvertOptions, encoder: EncoderSpec) -> Fil
     started = time.monotonic()
     crf = options.crf if encoder.name == "libx265" else None
     cmd = build_ffmpeg_command(
-        src, dst, encoder, options.speed, scale_args, audio_args, crf=crf
+        src,
+        dst,
+        encoder,
+        options.speed,
+        scale_args,
+        audio_args,
+        crf=crf,
+        bitrate_cap_args=cap_args,
     )
     returncode, err_tail = run_ffmpeg_with_progress(cmd, info.duration_s)
     used = encoder
@@ -752,7 +891,14 @@ def convert_one(src: Path, options: ConvertOptions, encoder: EncoderSpec) -> Fil
         _remove_quietly(dst)
         crf = options.crf if fallback.name == "libx265" else None
         cmd = build_ffmpeg_command(
-            src, dst, fallback, options.speed, scale_args, audio_args, crf=crf
+            src,
+            dst,
+            fallback,
+            options.speed,
+            scale_args,
+            audio_args,
+            crf=crf,
+            bitrate_cap_args=cap_args,
         )
         returncode, err_tail = run_ffmpeg_with_progress(cmd, info.duration_s)
         used = fallback
@@ -944,7 +1090,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--res",
         choices=tuple(RES_POLICIES),
-        default="max720",
+        default="short480",
         help="resolution policy",
     )
     parser.add_argument(
