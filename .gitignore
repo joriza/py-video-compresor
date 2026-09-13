@@ -1,0 +1,7 @@
+# Local Pi runtime state
+.atl/
+.venv/
+input/
+__pycache__/
+tests_tmp/
+.ruff_cache/

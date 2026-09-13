@@ -1,0 +1,1 @@
+# Sin dependencias externas — biblioteca estándar + ffmpeg del sistema. Las dependencias futuras van aquí.
