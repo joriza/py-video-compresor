@@ -207,6 +207,11 @@ def test_dry_run(src: Path) -> None:
         "libx265" in proc.stdout,
         proc.stdout[-400:],
     )
+    check(
+        "dry-run: default CRF is 28",
+        "crf 28" in proc.stdout,
+        proc.stdout[-400:],
+    )
 
     proc = run_converter(["--dry-run", "--crf", "28", str(src)])
     check(

@@ -136,7 +136,7 @@ HEVC_ENCODER_ARGS: dict[str, dict[str, tuple[str, ...]]] = {
             "-preset",
             "fast",
             "-crf",
-            "24",
+            "28",
             "-x265-params",
             "log-level=error",
             "-tag:v",
@@ -979,11 +979,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--crf",
         type=int,
-        default=24,
+        default=28,
         metavar="N",
         help=(
-            "libx265 CRF quality: higher = smaller file (try 26-28); "
-            "applies to the CPU encoder only"
+            "libx265 CRF quality: higher = smaller file, lower = better "
+            "quality; applies to the CPU encoder only"
         ),
     )
     return parser

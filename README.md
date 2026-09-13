@@ -33,8 +33,8 @@ python convert.py
 # Codificar con detección de hardware (por defecto se usa la CPU)
 python convert.py --hw clip.avi
 
-# Más compresión en el encoder de CPU (CRF 28 en vez de 24)
-python convert.py --crf 28 episode.mkv
+# Otro valor de CRF (el predeterminado es 28)
+python convert.py --crf 26 episode.mkv
 
 # Mostrar el plan sin codificar nada
 python convert.py --dry-run episode.mkv
@@ -56,7 +56,7 @@ python convert.py --force clip.mov
 | `--force` | desactivado | Re-codificar aunque el archivo de salida exista. |
 | `--dry-run` | desactivado | Imprime el plan por archivo (encoder, escalado, audio, salida) y no codifica nada. |
 | `--hw`, `--gpu` | desactivado | Habilita la detección de encoders por hardware (NVENC/QSV/AMF); por defecto se usa la CPU (`libx265`). |
-| `--crf N` | `24` | Calidad CRF de `libx265`: más alto = archivo más chico (probar 26-28); aplica solo al encoder de CPU. |
+| `--crf N` | `28` | Calidad CRF de `libx265`: más alto = archivo más chico, más bajo = mejor calidad; aplica solo al encoder de CPU. |
 
 ### Probar valores no predeterminados (A/B)
 
@@ -78,7 +78,7 @@ python convert.py --force --hw --suffix _hw "clip.mp4"
 ```
 
 - Regla práctica del CRF: cada +6 divide el bitrate a la mitad; 26-28 es el
-  rango útil para 720p (el valor predeterminado es 24).
+  rango útil para 720p (el valor predeterminado es 28).
 - `--crf` solo afecta a `libx265`. Los encoders por hardware (`--hw`) tienen su
   calidad fijada en el registro e ignoran este valor; si un encoder de hardware
   falla y el archivo se reintenta con CPU, ese reintento sí usa el CRF indicado.
@@ -106,7 +106,7 @@ Sintaxis de selección: `1 3 5-7` (espacios o comas, rangos inclusivos),
    se muestra por salida estándar.
 3. **Codificación de video (velocidad `fast`)** — objetivos de calidad por
    encoder (el CRF de `libx265` se puede ajustar con `--crf N`):
-   - `libx265`: `-preset fast -crf 24 -x265-params log-level=error -tag:v hvc1`
+   - `libx265`: `-preset fast -crf 28 -x265-params log-level=error -tag:v hvc1`
    - `hevc_amf`: `-quality balanced -rc qvbr -qvbr_quality_level 26`
    - `hevc_nvenc`: `-preset p6 -tune hq -rc vbr -cq 26 -b:v 0 -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20`
    - `hevc_qsv`: `-preset veryfast -global_quality 26`
@@ -147,18 +147,20 @@ Desde la raíz del proyecto (usa el Python del venv local):
 La suite genera muestras sintéticas 1080p/480p con ffmpeg lavfi dentro de
 `tests_tmp/` (se elimina al salir), incluye un nombre de archivo con espacios y
 verifica el comportamiento de codec, escalado, audio, tamaño, dry-run, omisión
-y forzado (21 verificaciones).
+y forzado (22 verificaciones).
 
 ## Historial de cambios
 
 - **2026-09-13**
+  - El valor predeterminado de `--crf` pasa a **28** (antes 24), validado
+    empíricamente: ≈49% de reducción sin pérdida de calidad perceptible.
   - El encoder de CPU (`libx265`) pasa a ser el predeterminado; `--cpu-only` se
     eliminó y la detección de hardware quedó como opt-in (`--hw`/`--gpu`).
   - Nuevo `--crf N` para controlar el punto calidad/tamaño del encoder de CPU.
   - Fusible a nivel de corrida: tras un fallo del encoder de hardware, el resto
     del lote pasa directo a la CPU.
   - Documentación y comentarios del código traducidos al español.
-  - Suite de smoke ampliada a 21 verificaciones.
+  - Suite de smoke ampliada a 22 verificaciones.
 
 ## Limitaciones conocidas
 
